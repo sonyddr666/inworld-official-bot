@@ -154,6 +154,23 @@ def get_default_user_state() -> Dict[str, Any]:
     return copy.deepcopy(DEFAULT_USER_STATE)
 
 
+def normalize_text_normalization(value: Any) -> str:
+    if isinstance(value, bool):
+        return "ON" if value else "OFF"
+
+    raw = str(value or "").strip().upper()
+    if raw in {"", "NONE", "NULL"}:
+        return "APPLY_TEXT_NORMALIZATION_UNSPECIFIED"
+    if raw in {"ON", "TRUE", "1"}:
+        return "ON"
+    if raw in {"OFF", "FALSE", "0"}:
+        return "OFF"
+    if raw == "APPLY_TEXT_NORMALIZATION_UNSPECIFIED":
+        return raw
+
+    return "APPLY_TEXT_NORMALIZATION_UNSPECIFIED"
+
+
 def is_custom_voice(voice: Dict[str, Any]) -> bool:
     voice_id = voice.get("voiceId", "") or ""
     return "__" in voice_id
@@ -262,7 +279,7 @@ class InworldClient:
             "voiceId": voice_id,
             "modelId": settings.get("model_id", DEFAULT_USER_STATE["model_id"]),
             "temperature": float(settings.get("temperature", 1.0)),
-            "applyTextNormalization": bool(
+            "applyTextNormalization": normalize_text_normalization(
                 settings.get("apply_text_normalization", True)
             ),
             "audioConfig": {
