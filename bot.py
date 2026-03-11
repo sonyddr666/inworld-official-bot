@@ -1054,7 +1054,7 @@ async def synthesize_parts(
 
     timestamp_enabled = state.get("timestamp_type", "OFF") != "OFF"
     for idx, chunk in enumerate(chunks, start=1):
-        await update.effective_chat.send_action(ChatAction.UPLOAD_AUDIO)
+        await update.effective_chat.send_action(ChatAction.UPLOAD_VOICE)
         async with API_SEMAPHORE:
             try:
                 result = await asyncio.to_thread(
