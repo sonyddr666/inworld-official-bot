@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import tempfile
+import warnings
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -12,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
+from telegram.warnings import PTBUserWarning
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -37,6 +39,12 @@ from storage import LocalStateStore
 
 
 load_dotenv()
+
+warnings.filterwarnings(
+    "ignore",
+    message=r".*If 'per_message=False', 'CallbackQueryHandler' will not be tracked for every message.*",
+    category=PTBUserWarning,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
