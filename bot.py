@@ -51,6 +51,7 @@ DEFAULT_AUTH_HEADER = os.getenv("INWORLD_BASE64_CREDENTIAL", "").strip()
 DEFAULT_VOICE_ID = os.getenv("INWORLD_DEFAULT_VOICE_ID", "").strip()
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 MAX_CHARS_PER_REQUEST = int(os.getenv("INWORLD_MAX_CHARS_PER_REQUEST", "1900"))
+MIN_CLONE_SAMPLES = 3
 MAX_CLONE_SAMPLES = 3
 MAX_CLONE_TOTAL_SIZE = 16 * 1024 * 1024
 SAMPLE_RATE_OPTIONS = [16000, 22050, 24000, 44100, 48000]
@@ -127,6 +128,40 @@ def format_settings(state: Dict[str, Any]) -> str:
         f"- Sample rate: {state.get('sample_rate_hertz')} Hz\n"
         f"- Normalizacao: {'on' if state.get('apply_text_normalization') else 'off'}\n"
         f"- Timestamps: {state.get('timestamp_type')}"
+    )
+
+
+def format_home_text(state: Dict[str, Any]) -> str:
+    voice_name = state.get("active_voice_name") or state.get("active_voice_id") or "nao definida"
+    return (
+        "🤖 Bot Inworld\n\n"
+        "Olá! Escolha uma opção:\n\n"
+        f"Voz atual: {voice_name}\n"
+        "Envie texto ou um arquivo .txt quando estiver em síntese."
+    )
+
+
+def format_help_text() -> str:
+    return (
+        "ℹ️ Ajuda / Sobre\n\n"
+        "Este bot usa a API oficial da Inworld com Basic Auth.\n\n"
+        "Fluxos principais:\n"
+        "- Clonar voz com 3 amostras\n"
+        "- Listar vozes/personagens\n"
+        "- Sintetizar texto curto, texto longo e .txt\n"
+        "- Ajustar modelo, velocidade, temperatura, formato e sample rate\n\n"
+        "Comandos ainda disponíveis:\n"
+        "/apikey /settings /voices /myvoices /clone /model /speed /temp /encoding /samplerate /normalize /timestamps"
+    )
+
+
+def format_synthesize_text(state: Dict[str, Any]) -> str:
+    voice_name = state.get("active_voice_name") or state.get("active_voice_id") or "nao definida"
+    return (
+        "🔊 Sintetizar\n\n"
+        f"🎭 Personagem/Voz atual: {voice_name}\n\n"
+        "Envie um texto, .txt ou .md e eu retorno o áudio.\n"
+        "Textos grandes são divididos automaticamente com aviso."
     )
 
 
@@ -225,41 +260,260 @@ def get_language_rows(include_all: bool = True, prefix: str = "langpick") -> Lis
     return rows
 
 
+def build_home_menu_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🎙️ Clonar Voz", callback_data="menu:clone"),
+                InlineKeyboardButton("🔊 Sintetizar", callback_data="menu:synthesize"),
+            ],
+            [
+                InlineKeyboardButton("🎭 Personagens", callback_data="menu:characters"),
+                InlineKeyboardButton("⚙️ Config", callback_data="menu:config"),
+            ],
+            [
+                InlineKeyboardButton("ℹ️ Ajuda / Sobre", callback_data="menu:help"),
+            ],
+        ]
+    )
+
+
+def build_back_home_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🏠 Menu", callback_data="menu:home")]]
+    )
+
+
+def build_post_synthesis_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🔄 Nova conversa", callback_data="menu:newchat"),
+                InlineKeyboardButton("🏠 Menu", callback_data="menu:home"),
+            ]
+        ]
+    )
+
+
+def build_synthesize_prompt_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🎭 Personagens", callback_data="menu:characters"),
+                InlineKeyboardButton("⚙️ Config", callback_data="menu:config"),
+            ],
+            [InlineKeyboardButton("🏠 Menu", callback_data="menu:home")],
+        ]
+    )
+
+
+def build_config_menu_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🤖 Modelo", callback_data="cfg:model"),
+                InlineKeyboardButton("⏩ Velocidade", callback_data="cfg:speed"),
+            ],
+            [
+                InlineKeyboardButton("🌡 Temperatura", callback_data="cfg:temp"),
+                InlineKeyboardButton("🎧 Formato", callback_data="cfg:encoding"),
+            ],
+            [
+                InlineKeyboardButton("📻 Sample Rate", callback_data="cfg:samplerate"),
+                InlineKeyboardButton("🧹 Normalização", callback_data="cfg:normalize"),
+            ],
+            [
+                InlineKeyboardButton("⏱ Timestamps", callback_data="cfg:timestamps"),
+                InlineKeyboardButton("🎭 Personagens", callback_data="menu:characters"),
+            ],
+            [InlineKeyboardButton("🏠 Menu", callback_data="menu:home")],
+        ]
+    )
+
+
+def build_model_markup(current_model: str) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"{'OK ' if key == current_model else ''}{label}",
+                callback_data=f"set:model:{key}",
+            )
+        ]
+        for key, label in MODELS.items()
+    ]
+    rows.append([InlineKeyboardButton("⚙️ Config", callback_data="menu:config")])
+    rows.append([InlineKeyboardButton("🏠 Menu", callback_data="menu:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_speed_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("0.75x", callback_data="set:speed:0.75"),
+                InlineKeyboardButton("1.0x", callback_data="set:speed:1.0"),
+                InlineKeyboardButton("1.25x", callback_data="set:speed:1.25"),
+            ],
+            [
+                InlineKeyboardButton("1.5x", callback_data="set:speed:1.5"),
+                InlineKeyboardButton("2.0x", callback_data="set:speed:2.0"),
+                InlineKeyboardButton("3.0x", callback_data="set:speed:3.0"),
+            ],
+            [InlineKeyboardButton("⚙️ Config", callback_data="menu:config")],
+            [InlineKeyboardButton("🏠 Menu", callback_data="menu:home")],
+        ]
+    )
+
+
+def build_temperature_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("0.7", callback_data="set:temp:0.7"),
+                InlineKeyboardButton("1.0", callback_data="set:temp:1.0"),
+                InlineKeyboardButton("1.2", callback_data="set:temp:1.2"),
+            ],
+            [
+                InlineKeyboardButton("1.35", callback_data="set:temp:1.35"),
+                InlineKeyboardButton("1.5", callback_data="set:temp:1.5"),
+            ],
+            [InlineKeyboardButton("⚙️ Config", callback_data="menu:config")],
+            [InlineKeyboardButton("🏠 Menu", callback_data="menu:home")],
+        ]
+    )
+
+
+def build_encoding_markup(current_encoding: str) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"{'OK ' if key == current_encoding else ''}{key}",
+                callback_data=f"set:encoding:{key}",
+            )
+        ]
+        for key in AUDIO_ENCODINGS
+    ]
+    rows.append([InlineKeyboardButton("⚙️ Config", callback_data="menu:config")])
+    rows.append([InlineKeyboardButton("🏠 Menu", callback_data="menu:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_samplerate_markup(current_sample_rate: int) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"{'OK ' if value == current_sample_rate else ''}{value} Hz",
+                callback_data=f"set:samplerate:{value}",
+            )
+        ]
+        for value in SAMPLE_RATE_OPTIONS
+    ]
+    rows.append([InlineKeyboardButton("⚙️ Config", callback_data="menu:config")])
+    rows.append([InlineKeyboardButton("🏠 Menu", callback_data="menu:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_normalize_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Normalização ON", callback_data="set:normalize:on"),
+                InlineKeyboardButton("Normalização OFF", callback_data="set:normalize:off"),
+            ],
+            [InlineKeyboardButton("⚙️ Config", callback_data="menu:config")],
+            [InlineKeyboardButton("🏠 Menu", callback_data="menu:home")],
+        ]
+    )
+
+
+def build_timestamps_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("OFF", callback_data="set:timestamps:OFF"),
+                InlineKeyboardButton("WORD", callback_data="set:timestamps:WORD"),
+                InlineKeyboardButton("CHARACTER", callback_data="set:timestamps:CHARACTER"),
+            ],
+            [InlineKeyboardButton("⚙️ Config", callback_data="menu:config")],
+            [InlineKeyboardButton("🏠 Menu", callback_data="menu:home")],
+        ]
+    )
+
+
+def format_clone_status(clone: Dict[str, Any]) -> str:
+    samples = clone.get("samples", [])
+    lines = [
+        "🎙️ Clone de Voz",
+        "",
+        f"Nome: {clone.get('display_name') or '-'}",
+        f"Idioma: {LANGUAGE_LABELS.get(clone.get('lang_code', 'PT_BR'), clone.get('lang_code', 'PT_BR'))}",
+        "",
+        f"Envie os arquivos de áudio de referência (mínimo {MIN_CLONE_SAMPLES}):",
+        "",
+    ]
+    if samples:
+        for sample in samples:
+            lines.append(f"📎 {sample.get('name', 'sample')}  ✅ recebido")
+    else:
+        lines.append("Aguardando amostras...")
+    return "\n".join(lines)
+
+
+def build_clone_status_markup(sample_count: int) -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = []
+    if sample_count >= MIN_CLONE_SAMPLES:
+        rows.append(
+            [
+                InlineKeyboardButton("✅ Confirmar", callback_data="cloneconfirm:done"),
+                InlineKeyboardButton("❌ Cancelar", callback_data="cloneconfirm:cancel"),
+            ]
+        )
+    else:
+        rows.append([InlineKeyboardButton("❌ Cancelar", callback_data="cloneconfirm:cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def respond_to_callback_panel(query, text: str, reply_markup: InlineKeyboardMarkup) -> None:
+    message = query.message
+    if getattr(message, "text", None):
+        try:
+            await query.edit_message_text(text, reply_markup=reply_markup)
+            return
+        except Exception:
+            pass
+    await message.reply_text(text, reply_markup=reply_markup)
+
+
 async def reply_no_key(update: Update) -> None:
     await update.effective_message.reply_text(
         "Nenhuma API key oficial configurada.\n"
         "Use /apikey Basic_BASE64 ou /apikey key_id:key_secret.\n"
-        "Para remover a chave salva: /apikey clear"
+        "Para remover a chave salva: /apikey clear",
+        reply_markup=build_home_menu_markup(),
     )
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    state = get_state(update.effective_user.id)
     await update.message.reply_text(
-        "Bot Telegram Inworld API oficial\n\n"
-        "Comandos principais:\n"
-        "/apikey - salvar ou limpar API key\n"
-        "/settings - ver configuracao atual\n"
-        "/voices - listar e trocar voz\n"
-        "/myvoices - listar clones e deletar\n"
-        "/clone - iniciar clone de voz\n"
-        "/model - trocar modelo\n"
-        "/speed - ajustar velocidade\n"
-        "/temp - ajustar temperatura\n"
-        "/encoding - trocar formato de audio\n"
-        "/samplerate - trocar sample rate\n"
-        "/normalize - ligar/desligar normalizacao\n"
-        "/timestamps - exportar alinhamento\n\n"
-        "Envie texto ou um .txt para receber o audio."
+        format_home_text(state),
+        reply_markup=build_home_menu_markup(),
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await start_command(update, context)
+    await update.message.reply_text(
+        format_help_text(),
+        reply_markup=build_home_menu_markup(),
+    )
 
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     state = get_state(update.effective_user.id)
-    await update.message.reply_text(format_settings(state))
+    await update.message.reply_text(
+        format_settings(state),
+        reply_markup=build_config_menu_markup(),
+    )
 
 
 async def apikey_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -309,13 +563,9 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(f"Modelo definido para {model_id}.")
         return
 
-    rows = [
-        [InlineKeyboardButton(f"{'OK ' if key == state['model_id'] else ''}{label}", callback_data=f"set:model:{key}")]
-        for key, label in MODELS.items()
-    ]
     await update.message.reply_text(
         "Escolha o modelo:",
-        reply_markup=InlineKeyboardMarkup(rows),
+        reply_markup=build_model_markup(state["model_id"]),
     )
 
 
@@ -333,21 +583,9 @@ async def speed_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(f"Velocidade definida para {value}.")
         return
 
-    buttons = [
-        [
-            InlineKeyboardButton("0.75x", callback_data="set:speed:0.75"),
-            InlineKeyboardButton("1.0x", callback_data="set:speed:1.0"),
-            InlineKeyboardButton("1.25x", callback_data="set:speed:1.25"),
-        ],
-        [
-            InlineKeyboardButton("1.5x", callback_data="set:speed:1.5"),
-            InlineKeyboardButton("2.0x", callback_data="set:speed:2.0"),
-            InlineKeyboardButton("3.0x", callback_data="set:speed:3.0"),
-        ],
-    ]
     await update.message.reply_text(
         "Escolha a velocidade ou use /speed 1.15",
-        reply_markup=InlineKeyboardMarkup(buttons),
+        reply_markup=build_speed_markup(),
     )
 
 
@@ -365,20 +603,9 @@ async def temperature_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"Temperatura definida para {value}.")
         return
 
-    buttons = [
-        [
-            InlineKeyboardButton("0.7", callback_data="set:temp:0.7"),
-            InlineKeyboardButton("1.0", callback_data="set:temp:1.0"),
-            InlineKeyboardButton("1.2", callback_data="set:temp:1.2"),
-        ],
-        [
-            InlineKeyboardButton("1.35", callback_data="set:temp:1.35"),
-            InlineKeyboardButton("1.5", callback_data="set:temp:1.5"),
-        ],
-    ]
     await update.message.reply_text(
         "Escolha a temperatura ou use /temp 1.1",
-        reply_markup=InlineKeyboardMarkup(buttons),
+        reply_markup=build_temperature_markup(),
     )
 
 
@@ -398,18 +625,9 @@ async def encoding_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text(f"Encoding definido para {value}.")
         return
 
-    rows = [
-        [
-            InlineKeyboardButton(
-                f"{'OK ' if key == state['audio_encoding'] else ''}{key}",
-                callback_data=f"set:encoding:{key}",
-            )
-        ]
-        for key in AUDIO_ENCODINGS
-    ]
     await update.message.reply_text(
         "Escolha o formato do audio:",
-        reply_markup=InlineKeyboardMarkup(rows),
+        reply_markup=build_encoding_markup(state["audio_encoding"]),
     )
 
 
@@ -428,45 +646,23 @@ async def samplerate_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"Sample rate definido para {value} Hz.")
         return
 
-    rows = [
-        [
-            InlineKeyboardButton(
-                f"{'OK ' if value == state['sample_rate_hertz'] else ''}{value} Hz",
-                callback_data=f"set:samplerate:{value}",
-            )
-        ]
-        for value in SAMPLE_RATE_OPTIONS
-    ]
     await update.message.reply_text(
         "Escolha o sample rate:",
-        reply_markup=InlineKeyboardMarkup(rows),
+        reply_markup=build_samplerate_markup(state["sample_rate_hertz"]),
     )
 
 
 async def normalize_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    buttons = [
-        [
-            InlineKeyboardButton("Normalizacao ON", callback_data="set:normalize:on"),
-            InlineKeyboardButton("Normalizacao OFF", callback_data="set:normalize:off"),
-        ]
-    ]
     await update.message.reply_text(
         "Normalizacao ajuda em abreviacoes, datas e numeros.",
-        reply_markup=InlineKeyboardMarkup(buttons),
+        reply_markup=build_normalize_markup(),
     )
 
 
 async def timestamps_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    rows = [
-        [
-            InlineKeyboardButton("OFF", callback_data="set:timestamps:OFF"),
-            InlineKeyboardButton("WORD", callback_data="set:timestamps:WORD"),
-            InlineKeyboardButton("CHARACTER", callback_data="set:timestamps:CHARACTER"),
-        ]
-    ]
     await update.message.reply_text(
         "Timestamps aumentam a latencia e hoje funcionam melhor em ingles.",
-        reply_markup=InlineKeyboardMarkup(rows),
+        reply_markup=build_timestamps_markup(),
     )
 
 
@@ -538,6 +734,12 @@ def build_voice_browser_keyboard(
             InlineKeyboardButton(
                 "Clonadas", callback_data=f"browse:{language_filter}:custom:0:{int(allow_delete)}"
             ),
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton("🔊 Sintetizar", callback_data="menu:synthesize"),
+            InlineKeyboardButton("🏠 Menu", callback_data="menu:home"),
         ]
     )
     return InlineKeyboardMarkup(rows)
@@ -680,19 +882,22 @@ async def set_voice_by_index(
         "Voz alterada\n"
         f"- Nome: {state['active_voice_name']}\n"
         f"- ID: {state['active_voice_id']}\n"
-        f"- Idioma: {selected.get('langCode', '-')}"
+        f"- Idioma: {selected.get('langCode', '-')}",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("🔊 Sintetizar", callback_data="menu:synthesize"),
+                    InlineKeyboardButton("🏠 Menu", callback_data="menu:home"),
+                ]
+            ]
+        ),
     )
 
 
-async def clone_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    state = get_state(update.effective_user.id)
-    if not (state.get("api_auth") or DEFAULT_AUTH_HEADER):
-        await reply_no_key(update)
-        return ConversationHandler.END
-
-    clone_dir = TMP_CLONE_DIR / str(update.effective_user.id)
+def initialize_clone_context(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> Dict[str, Any]:
+    clone_dir = TMP_CLONE_DIR / str(user_id)
     clone_dir.mkdir(parents=True, exist_ok=True)
-    context.user_data["clone"] = {
+    clone = {
         "display_name": "",
         "lang_code": "PT_BR",
         "description": "",
@@ -701,8 +906,40 @@ async def clone_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         "samples": [],
         "clone_dir": str(clone_dir),
     }
+    context.user_data["clone"] = clone
+    return clone
+
+
+async def clone_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    state = get_state(update.effective_user.id)
+    if not (state.get("api_auth") or DEFAULT_AUTH_HEADER):
+        await reply_no_key(update)
+        return ConversationHandler.END
+
+    initialize_clone_context(update.effective_user.id, context)
     await update.message.reply_text(
         "Clone de voz iniciado.\nEnvie o nome exibido da voz."
+    )
+    return CLONE_NAME
+
+
+async def clone_start_from_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    state = get_state(update.effective_user.id)
+    if not (state.get("api_auth") or DEFAULT_AUTH_HEADER):
+        await query.edit_message_text(
+            "Nenhuma API key oficial configurada.\nUse /apikey antes de clonar voz.",
+            reply_markup=build_home_menu_markup(),
+        )
+        return ConversationHandler.END
+
+    initialize_clone_context(update.effective_user.id, context)
+    await query.edit_message_text(
+        "🎙️ Clone de Voz\n\nEnvie o nome exibido da voz.",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("❌ Cancelar", callback_data="cloneconfirm:cancel")]]
+        ),
     )
     return CLONE_NAME
 
@@ -714,6 +951,7 @@ async def clone_receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     clone["display_name"] = update.message.text.strip()[:60]
     rows = get_language_rows(include_all=False)
+    rows.append([InlineKeyboardButton("❌ Cancelar", callback_data="cloneconfirm:cancel")])
     await update.message.reply_text(
         "Escolha o idioma principal da voz clonada:",
         reply_markup=InlineKeyboardMarkup(rows),
@@ -768,7 +1006,8 @@ async def clone_receive_tags(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [
             InlineKeyboardButton("Ruido ON", callback_data="clonenoise:on"),
             InlineKeyboardButton("Ruido OFF", callback_data="clonenoise:off"),
-        ]
+        ],
+        [InlineKeyboardButton("❌ Cancelar", callback_data="cloneconfirm:cancel")],
     ]
     await update.message.reply_text(
         "Remover ruido de fundo?",
@@ -786,7 +1025,8 @@ async def clone_skip_tags(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         [
             InlineKeyboardButton("Ruido ON", callback_data="clonenoise:on"),
             InlineKeyboardButton("Ruido OFF", callback_data="clonenoise:off"),
-        ]
+        ],
+        [InlineKeyboardButton("❌ Cancelar", callback_data="cloneconfirm:cancel")],
     ]
     await update.message.reply_text(
         "Sem tags.\nRemover ruido de fundo?",
@@ -803,11 +1043,11 @@ async def clone_pick_noise(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return ConversationHandler.END
     clone["remove_background_noise"] = query.data.endswith(":on")
     await query.edit_message_text(
-        "Agora envie de 1 a 3 amostras de audio.\n"
+        "Agora envie 3 amostras de audio.\n"
         "Formatos recomendados pela Inworld: wav, mp3 ou webm.\n"
         "Cada amostra deve ter idealmente 5 a 15 segundos.\n"
         "Se quiser, coloque a transcricao no caption.\n"
-        "Quando terminar, envie /clone_done."
+        "Quando completar as 3, o botão de confirmar aparece."
     )
     return CLONE_SAMPLES
 
@@ -824,7 +1064,7 @@ async def clone_expect_noise_button(update: Update, context: ContextTypes.DEFAUL
 
 async def clone_expect_samples(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.effective_message.reply_text(
-        "Nesta etapa envie audio(s) ou finalize com /clone_done."
+        "Nesta etapa envie os 3 áudios. Quando completar, use o botão Confirmar."
     )
     return CLONE_SAMPLES
 
@@ -836,7 +1076,7 @@ async def clone_receive_sample(update: Update, context: ContextTypes.DEFAULT_TYP
 
     samples = clone.get("samples", [])
     if len(samples) >= MAX_CLONE_SAMPLES:
-        await update.message.reply_text("Limite de 3 amostras atingido. Envie /clone_done.")
+        await update.message.reply_text("As 3 amostras já foram recebidas. Use o botão Confirmar.")
         return CLONE_SAMPLES
 
     message = update.message
@@ -880,6 +1120,7 @@ async def clone_receive_sample(update: Update, context: ContextTypes.DEFAULT_TYP
     transcription = (message.caption or "").strip()
     sample = {
         "path": str(dest),
+        "name": dest.name,
         "size": file_size,
         "duration": duration,
         "transcription": transcription,
@@ -894,8 +1135,8 @@ async def clone_receive_sample(update: Update, context: ContextTypes.DEFAULT_TYP
         warning += "\nAviso: formato fora do recomendado pode falhar."
 
     await update.message.reply_text(
-        f"Amostra {len(samples)}/{MAX_CLONE_SAMPLES} salva.{warning}\n"
-        "Envie mais uma ou /clone_done."
+        f"{format_clone_status(clone)}{warning}",
+        reply_markup=build_clone_status_markup(len(samples)),
     )
     return CLONE_SAMPLES
 
@@ -917,12 +1158,15 @@ async def cleanup_clone_uploads(clone: Dict[str, Any]) -> None:
 
 async def clone_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     clone = context.user_data.get("clone")
+    message = update.effective_message
     if not clone:
-        await update.message.reply_text("Nenhum clone em andamento.")
+        await message.reply_text("Nenhum clone em andamento.")
         return ConversationHandler.END
 
-    if not clone.get("samples"):
-        await update.message.reply_text("Envie ao menos uma amostra antes de /clone_done.")
+    if len(clone.get("samples", [])) < MIN_CLONE_SAMPLES:
+        await message.reply_text(
+            f"Envie {MIN_CLONE_SAMPLES} amostras antes de confirmar o clone."
+        )
         return CLONE_SAMPLES
 
     user_id = update.effective_user.id
@@ -941,7 +1185,7 @@ async def clone_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             payload["transcription"] = sample["transcription"]
         voice_samples.append(payload)
 
-    status = await update.message.reply_text("Clonando voz na Inworld...")
+    status = await message.reply_text("Clonando voz na Inworld...")
     try:
         async with API_SEMAPHORE:
             voice = await asyncio.to_thread(
@@ -967,18 +1211,38 @@ async def clone_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         f"- Nome: {voice.get('displayName')}\n"
         f"- ID: {voice.get('voiceId')}\n"
         f"- Idioma: {voice.get('langCode')}\n"
-        "Essa voz ja ficou ativa para suas proximas sinteses."
+        "Essa voz ja ficou ativa para suas proximas sinteses.",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("🔊 Sintetizar", callback_data="menu:synthesize"),
+                    InlineKeyboardButton("🎭 Personagens", callback_data="menu:myvoices"),
+                ],
+                [InlineKeyboardButton("🏠 Menu", callback_data="menu:home")],
+            ]
+        ),
     )
     await cleanup_clone_uploads(clone)
     context.user_data.pop("clone", None)
     return ConversationHandler.END
 
 
+async def clone_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    if query.data == "cloneconfirm:cancel":
+        return await cancel_command(update, context)
+    return await clone_finish(update, context)
+
+
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     clone = context.user_data.pop("clone", None)
     if clone:
         await cleanup_clone_uploads(clone)
-    await update.effective_message.reply_text("Operacao cancelada.")
+    await update.effective_message.reply_text(
+        "Operação cancelada.",
+        reply_markup=build_home_menu_markup(),
+    )
     return ConversationHandler.END
 
 
@@ -1087,12 +1351,14 @@ async def synthesize_parts(
                         filename=audio_path.name,
                         caption=caption,
                         title=audio_path.stem,
+                        reply_markup=build_post_synthesis_markup(),
                     )
                 else:
                     await update.effective_message.reply_document(
                         document=audio_stream,
                         filename=audio_path.name,
                         caption=caption,
+                        reply_markup=build_post_synthesis_markup(),
                     )
 
             if timestamp_enabled and result.timestamp_info:
@@ -1152,6 +1418,128 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     parts = query.data.split(":")
     action = parts[0]
 
+    if action == "cloneconfirm":
+        await respond_to_callback_panel(
+            query,
+            "Esse fluxo de clone já foi encerrado. Inicie novamente pelo menu.",
+            build_home_menu_markup(),
+        )
+        return
+
+    if action == "menu":
+        target = parts[1]
+        if target == "home":
+            await respond_to_callback_panel(
+                query,
+                format_home_text(state),
+                build_home_menu_markup(),
+            )
+            return
+        if target == "help":
+            await respond_to_callback_panel(
+                query,
+                format_help_text(),
+                build_home_menu_markup(),
+            )
+            return
+        if target == "config":
+            await respond_to_callback_panel(
+                query,
+                format_settings(state),
+                build_config_menu_markup(),
+            )
+            return
+        if target == "synthesize":
+            await respond_to_callback_panel(
+                query,
+                format_synthesize_text(state),
+                build_synthesize_prompt_markup(),
+            )
+            return
+        if target == "characters":
+            state["voice_scope"] = "all"
+            save_state(user_id, state)
+            await show_voice_browser(
+                query.message,
+                state=state,
+                user_id=user_id,
+                page=0,
+                allow_delete=False,
+                edit=True,
+            )
+            return
+        if target == "myvoices":
+            state["voice_scope"] = "custom"
+            save_state(user_id, state)
+            await show_voice_browser(
+                query.message,
+                state=state,
+                user_id=user_id,
+                page=0,
+                allow_delete=True,
+                edit=True,
+            )
+            return
+        if target == "newchat":
+            await respond_to_callback_panel(
+                query,
+                "🔄 Nova conversa iniciada.\n\nEnvie um novo texto para gerar áudio.",
+                build_synthesize_prompt_markup(),
+            )
+            return
+
+    if action == "cfg":
+        target = parts[1]
+        if target == "model":
+            await respond_to_callback_panel(
+                query,
+                "Escolha o modelo:",
+                build_model_markup(state["model_id"]),
+            )
+            return
+        if target == "speed":
+            await respond_to_callback_panel(
+                query,
+                "Escolha a velocidade:",
+                build_speed_markup(),
+            )
+            return
+        if target == "temp":
+            await respond_to_callback_panel(
+                query,
+                "Escolha a temperatura:",
+                build_temperature_markup(),
+            )
+            return
+        if target == "encoding":
+            await respond_to_callback_panel(
+                query,
+                "Escolha o formato do áudio:",
+                build_encoding_markup(state["audio_encoding"]),
+            )
+            return
+        if target == "samplerate":
+            await respond_to_callback_panel(
+                query,
+                "Escolha o sample rate:",
+                build_samplerate_markup(state["sample_rate_hertz"]),
+            )
+            return
+        if target == "normalize":
+            await respond_to_callback_panel(
+                query,
+                "Normalização ajuda em abreviações, datas e números.",
+                build_normalize_markup(),
+            )
+            return
+        if target == "timestamps":
+            await respond_to_callback_panel(
+                query,
+                "Timestamps aumentam a latência e hoje funcionam melhor em inglês.",
+                build_timestamps_markup(),
+            )
+            return
+
     if action == "set":
         kind = parts[1]
         value = parts[2]
@@ -1170,7 +1558,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         elif kind == "timestamps":
             state["timestamp_type"] = value
         save_state(user_id, state)
-        await query.edit_message_text(format_settings(state))
+        await query.edit_message_text(
+            format_settings(state),
+            reply_markup=build_config_menu_markup(),
+        )
         return
 
     if action == "browse":
@@ -1298,26 +1689,38 @@ def build_application() -> Application:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     clone_handler = ConversationHandler(
-        entry_points=[CommandHandler("clone", clone_start), CommandHandler("clonar", clone_start)],
+        entry_points=[
+            CommandHandler("clone", clone_start),
+            CommandHandler("clonar", clone_start),
+            CallbackQueryHandler(clone_start_from_button, pattern=r"^menu:clone$"),
+        ],
         states={
-            CLONE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, clone_receive_name)],
+            CLONE_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, clone_receive_name),
+                CallbackQueryHandler(clone_confirm_callback, pattern=r"^cloneconfirm:"),
+            ],
             CLONE_LANGUAGE: [
                 CallbackQueryHandler(clone_pick_language, pattern=r"^langpick:"),
+                CallbackQueryHandler(clone_confirm_callback, pattern=r"^cloneconfirm:"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, clone_expect_language_button),
             ],
             CLONE_DESCRIPTION: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, clone_receive_description),
                 CommandHandler("skip", clone_skip_description),
+                CallbackQueryHandler(clone_confirm_callback, pattern=r"^cloneconfirm:"),
             ],
             CLONE_TAGS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, clone_receive_tags),
                 CommandHandler("skip", clone_skip_tags),
+                CallbackQueryHandler(clone_confirm_callback, pattern=r"^cloneconfirm:"),
             ],
             CLONE_NOISE: [
                 CallbackQueryHandler(clone_pick_noise, pattern=r"^clonenoise:"),
+                CallbackQueryHandler(clone_confirm_callback, pattern=r"^cloneconfirm:"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, clone_expect_noise_button),
             ],
             CLONE_SAMPLES: [
+                CallbackQueryHandler(clone_confirm_callback, pattern=r"^cloneconfirm:"),
                 MessageHandler(
                     filters.AUDIO | filters.VOICE | filters.Document.ALL,
                     clone_receive_sample,
@@ -1333,6 +1736,7 @@ def build_application() -> Application:
     )
 
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("menu", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("settings", settings_command))
     app.add_handler(CommandHandler("apikey", apikey_command))
