@@ -51,3 +51,14 @@ class LocalStateStore:
         state = self.get_user_state(user_id)
         state.update(updates)
         return self.save_user_state(user_id, state)
+
+    def get_global_config(self) -> Dict[str, Any]:
+        with self.lock:
+            data = self._read()
+            return copy.deepcopy(data.get("global_config", {}))
+
+    def save_global_config(self, config: Dict[str, Any]) -> None:
+        with self.lock:
+            data = self._read()
+            data["global_config"] = copy.deepcopy(config)
+            self._write(data)

@@ -55,7 +55,6 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 TMP_CLONE_DIR.mkdir(exist_ok=True)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-DEFAULT_AUTH_HEADER = os.getenv("INWORLD_BASE64_CREDENTIAL", "").strip()
 DEFAULT_VOICE_ID = os.getenv("INWORLD_DEFAULT_VOICE_ID", "").strip()
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 MAX_CHARS_PER_REQUEST = int(os.getenv("INWORLD_MAX_CHARS_PER_REQUEST", "1900"))
@@ -63,11 +62,19 @@ MIN_CLONE_SAMPLES = 3
 MAX_CLONE_SAMPLES = 3
 MAX_CLONE_TOTAL_SIZE = 16 * 1024 * 1024
 SAMPLE_RATE_OPTIONS = [16000, 22050, 24000, 44100, 48000]
+TELEGRAM_ADMIN_IDS: set = set(
+    int(x.strip()) for x in os.getenv("TELEGRAM_ADMIN_IDS", "").split(",") if x.strip().isdigit()
+)
 
 STORE = LocalStateStore(DATA_DIR / "user_state.json")
 API_SEMAPHORE = asyncio.Semaphore(3)
 
+# DEFAULT_AUTH_HEADER: prioridade = chave global salva pelo admin via Telegram > .env
+_gc = STORE.get_global_config()
+DEFAULT_AUTH_HEADER: str = _gc.get("auth_header") or os.getenv("INWORLD_BASE64_CREDENTIAL", "").strip()
+
 CLONE_NAME, CLONE_LANGUAGE, CLONE_DESCRIPTION, CLONE_TAGS, CLONE_NOISE, CLONE_SAMPLES = range(6)
+APIKEY_INPUT, SETGLOBALKEY_INPUT = range(6, 8)
 
 LANGUAGE_ORDER = [
     "ALL",
@@ -141,10 +148,12 @@ def format_settings(state: Dict[str, Any]) -> str:
 
 def format_home_text(state: Dict[str, Any]) -> str:
     voice_name = state.get("active_voice_name") or state.get("active_voice_id") or "nao definida"
+    has_key = bool(state.get("api_auth") or DEFAULT_AUTH_HEADER)
+    key_status = "✅ Configurada" if has_key else "❌ Não configurada — use /apikey"
     return (
         "🤖 Bot Inworld\n\n"
-        "Olá! Escolha uma opção:\n\n"
-        f"Voz atual: {voice_name}\n"
+        f"🔑 API Key: {key_status}\n"
+        f"🎤 Voz atual: {voice_name}\n\n"
         "Envie texto ou um arquivo .txt quando estiver em síntese."
     )
 
@@ -280,6 +289,7 @@ def build_home_menu_markup() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("⚙️ Config", callback_data="menu:config"),
             ],
             [
+                InlineKeyboardButton("🔑 API Key", callback_data="menu:apikey"),
                 InlineKeyboardButton("ℹ️ Ajuda / Sobre", callback_data="menu:help"),
             ],
         ]
@@ -494,10 +504,13 @@ async def respond_to_callback_panel(query, text: str, reply_markup: InlineKeyboa
 
 async def reply_no_key(update: Update) -> None:
     await update.effective_message.reply_text(
-        "Nenhuma API key oficial configurada.\n"
-        "Use /apikey Basic_BASE64 ou /apikey key_id:key_secret.\n"
-        "Para remover a chave salva: /apikey clear",
-        reply_markup=build_home_menu_markup(),
+        "❌ Nenhuma API key Inworld configurada.\n\n"
+        "Para usar o bot, você precisa de uma chave da Inworld.\n"
+        "Clique em 'Configurar API Key' abaixo ou use /apikey.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔑 Configurar API Key", callback_data="menu:apikey")],
+            [InlineKeyboardButton("🏠 Menu", callback_data="menu:home")],
+        ]),
     )
 
 
@@ -524,37 +537,167 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
 
-async def apikey_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+def build_apikey_menu_markup(has_user_key: bool) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton("🔑 Inserir / Alterar chave", callback_data="apikey:start_input")]]
+    if has_user_key:
+        rows.append([InlineKeyboardButton("🗑 Remover minha chave", callback_data="apikey:clear")])
+    rows.append([InlineKeyboardButton("🏠 Menu", callback_data="menu:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def format_apikey_status(state: Dict[str, Any]) -> str:
+    user_key = state.get("api_auth", "")
+    if user_key:
+        status = f"✅ Sua chave pessoal: {mask_auth_header(user_key)}"
+    elif DEFAULT_AUTH_HEADER:
+        status = f"🌐 Chave global ativa: {mask_auth_header(DEFAULT_AUTH_HEADER)}"
+    else:
+        status = "❌ Nenhuma chave configurada"
+    return (
+        "🔑 API Key Inworld\n\n"
+        f"{status}\n\n"
+        "Formatos aceitos ao inserir:\n"
+        "• key_id:key_secret\n"
+        "• Basic BASE64\n\n"
+        "Sua chave pessoal tem prioridade sobre a chave global."
+    )
+
+
+async def apikey_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     state = get_state(user_id)
-    if not context.args:
-        await update.message.reply_text(
-            "Uso:\n"
-            "/apikey Basic SEU_BASE64\n"
-            "/apikey key_id:key_secret\n"
-            "/apikey clear\n\n"
-            f"Atual: {mask_auth_header(state.get('api_auth') or DEFAULT_AUTH_HEADER)}"
-        )
-        return
 
-    raw = " ".join(context.args).strip()
-    if raw.lower() == "clear":
-        state["api_auth"] = ""
+    # Suporte ao modo de args legado: /apikey key_id:key_secret ou /apikey clear
+    if context.args:
+        raw = " ".join(context.args).strip()
+        if raw.lower() == "clear":
+            state["api_auth"] = ""
+            save_state(user_id, state)
+            await update.message.reply_text(
+                "✅ Chave pessoal removida.",
+                reply_markup=build_apikey_menu_markup(False),
+            )
+            return ConversationHandler.END
+        try:
+            normalized = normalize_basic_credential(raw)
+        except ValueError as exc:
+            await update.message.reply_text(str(exc))
+            return ConversationHandler.END
+        state["api_auth"] = normalized
         save_state(user_id, state)
-        await update.message.reply_text("API key removida do armazenamento local do bot.")
-        return
+        await update.message.reply_text(
+            f"✅ API key salva!\nChave: {mask_auth_header(normalized)}",
+            reply_markup=build_home_menu_markup(),
+        )
+        return ConversationHandler.END
+
+    # Modo interativo: mostra status + botões
+    await update.message.reply_text(
+        format_apikey_status(state),
+        reply_markup=build_apikey_menu_markup(bool(state.get("api_auth"))),
+    )
+    return ConversationHandler.END
+
+
+async def apikey_start_input_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Acionado pelo botão 'Inserir / Alterar chave'."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "🔑 Envie sua API Key Inworld na próxima mensagem.\n\n"
+        "Formatos aceitos:\n"
+        "• key_id:key_secret\n"
+        "• Basic BASE64\n\n"
+        "Ou /cancel para cancelar."
+    )
+    return APIKEY_INPUT
+
+
+async def apikey_receive_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Recebe a chave enviada pelo usuário como mensagem."""
+    user_id = update.effective_user.id
+    state = get_state(user_id)
+    raw = update.message.text.strip()
 
     try:
         normalized = normalize_basic_credential(raw)
     except ValueError as exc:
-        await update.message.reply_text(str(exc))
-        return
+        await update.message.reply_text(
+            f"❌ Formato inválido: {exc}\n\nTente novamente ou /cancel para cancelar."
+        )
+        return APIKEY_INPUT
 
     state["api_auth"] = normalized
     save_state(user_id, state)
     await update.message.reply_text(
-        f"API key salva com sucesso.\nMascarada: {mask_auth_header(normalized)}"
+        f"✅ API key configurada com sucesso!\nChave: {mask_auth_header(normalized)}",
+        reply_markup=build_home_menu_markup(),
     )
+    return ConversationHandler.END
+
+
+async def apikey_clear_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Remove a chave pessoal do usuário."""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    state = get_state(user_id)
+    state["api_auth"] = ""
+    save_state(user_id, state)
+    await query.edit_message_text(
+        "✅ Chave pessoal removida.\n\n"
+        + format_apikey_status(state),
+        reply_markup=build_apikey_menu_markup(False),
+    )
+    return ConversationHandler.END
+
+
+async def setglobalkey_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Comando exclusivo de admin para alterar a chave global via Telegram."""
+    user_id = update.effective_user.id
+    if user_id not in TELEGRAM_ADMIN_IDS:
+        await update.message.reply_text(
+            "❌ Sem permissão. Configure TELEGRAM_ADMIN_IDS no Coolify com seu ID Telegram."
+        )
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        f"🌐 Chave global atual: {mask_auth_header(DEFAULT_AUTH_HEADER)}\n\n"
+        "Envie a nova chave global (será usada por todos os usuários sem chave própria).\n\n"
+        "Formatos aceitos:\n"
+        "• key_id:key_secret\n"
+        "• Basic BASE64\n\n"
+        "Ou /cancel para cancelar."
+    )
+    return SETGLOBALKEY_INPUT
+
+
+async def setglobalkey_receive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Recebe a nova chave global enviada pelo admin."""
+    global DEFAULT_AUTH_HEADER
+    user_id = update.effective_user.id
+
+    if user_id not in TELEGRAM_ADMIN_IDS:
+        return ConversationHandler.END
+
+    raw = update.message.text.strip()
+    try:
+        normalized = normalize_basic_credential(raw)
+    except ValueError as exc:
+        await update.message.reply_text(
+            f"❌ Formato inválido: {exc}\n\nTente novamente ou /cancel para cancelar."
+        )
+        return SETGLOBALKEY_INPUT
+
+    DEFAULT_AUTH_HEADER = normalized
+    STORE.save_global_config({"auth_header": normalized})
+
+    await update.message.reply_text(
+        f"✅ Chave global atualizada!\nChave: {mask_auth_header(normalized)}\n\n"
+        "Todos os usuários sem chave própria usarão esta chave agora.",
+        reply_markup=build_home_menu_markup(),
+    )
+    return ConversationHandler.END
 
 
 async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1495,6 +1638,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 build_synthesize_prompt_markup(),
             )
             return
+        if target == "apikey":
+            await respond_to_callback_panel(
+                query,
+                format_apikey_status(state),
+                build_apikey_menu_markup(bool(state.get("api_auth"))),
+            )
+            return
+
+    if action == "apikey":
+        target = parts[1]
+        if target == "clear":
+            state["api_auth"] = ""
+            save_state(user_id, state)
+            await respond_to_callback_panel(
+                query,
+                "✅ Chave pessoal removida.\n\n" + format_apikey_status(state),
+                build_apikey_menu_markup(False),
+            )
+            return
 
     if action == "cfg":
         target = parts[1]
@@ -1743,11 +1905,41 @@ def build_application() -> Application:
         allow_reentry=True,
     )
 
+    apikey_conv_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler("apikey", apikey_command),
+            CallbackQueryHandler(apikey_start_input_callback, pattern=r"^apikey:start_input$"),
+        ],
+        states={
+            APIKEY_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, apikey_receive_key),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_command)],
+        per_chat=True,
+        per_user=True,
+        allow_reentry=True,
+    )
+
+    setglobalkey_conv_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler("setglobalkey", setglobalkey_command),
+        ],
+        states={
+            SETGLOBALKEY_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, setglobalkey_receive),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_command)],
+        per_chat=True,
+        per_user=True,
+        allow_reentry=True,
+    )
+
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("menu", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("settings", settings_command))
-    app.add_handler(CommandHandler("apikey", apikey_command))
     app.add_handler(CommandHandler("model", model_command))
     app.add_handler(CommandHandler("speed", speed_command))
     app.add_handler(CommandHandler("temp", temperature_command))
@@ -1760,6 +1952,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("voice", voice_command))
     app.add_handler(CommandHandler("myvoices", myvoices_command))
     app.add_handler(clone_handler)
+    app.add_handler(apikey_conv_handler)
+    app.add_handler(setglobalkey_conv_handler)
     app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.Document.ALL & ~filters.COMMAND, document_message_handler))
